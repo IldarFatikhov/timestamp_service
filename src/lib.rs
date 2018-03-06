@@ -13,7 +13,7 @@ use exonum::blockchain::{Blockchain, Service, Transaction, ApiContext};
 use exonum::node::{TransactionSend, ApiSender};
 use exonum::messages::{RawTransaction, Message};
 use exonum::storage::{Fork, MapIndex, Snapshot};
-use exonum::crypto::{Hash, PublicKey};
+use exonum::crypto::{self, Hash};
 use exonum::encoding;
 use exonum::api::{Api, ApiError};
 use iron::prelude::*;
@@ -36,9 +36,7 @@ encoding_struct! {
 
     struct Timestamp {
 
-        pub_key: &PublicKey,
-
-        file_hash: &str,
+        file_hash: &Hash,
 
         time: u64,
     }
@@ -57,12 +55,12 @@ impl<T: AsRef<Snapshot>> TimestampSchema<T> {
     }
 
     /// Returns an immutable version of the timestamps table.
-    pub fn timestamps(&self) -> MapIndex<&Snapshot, PublicKey, Timestamp> {
+    pub fn timestamps(&self) -> MapIndex<&Snapshot, Hash, Timestamp> {
         MapIndex::new("timestamps", self.view.as_ref())
     }
 
     /// Gets a specific timestamp from the storage.
-    pub fn timestamp(&self, pub_key: &PublicKey) -> Option<Timestamp> {
+    pub fn timestamp(&self, pub_key: &Hash) -> Option<Timestamp> {
         self.timestamps().get(pub_key)
     }
 }
@@ -71,7 +69,7 @@ impl<T: AsRef<Snapshot>> TimestampSchema<T> {
 /// to the storage.
 impl<'a> TimestampSchema<&'a mut Fork> {
     /// Returns a mutable version of the timestamps table.
-    pub fn timestamps_mut(&mut self) -> MapIndex<&mut Fork, PublicKey, Timestamp> {
+    pub fn timestamps_mut(&mut self) -> MapIndex<&mut Fork, Hash, Timestamp> {
         MapIndex::new("timestamps", &mut self.view)
     }
 }
@@ -85,9 +83,7 @@ message! {
 
         const ID = TX_CREATE_TIMESTAMP_ID;
 
-        pub_key: &PublicKey,
-
-        file_hash: &str,
+        data: &str,
     }
 }
 
@@ -105,18 +101,25 @@ impl Transaction for TxCreateTimestamp {
     /// with the specified public key and name, and an initial balance of 100.
     /// Otherwise, performs no op.
     fn execute(&self, view: &mut Fork) {
+
         let mut schema = TimestampSchema::new(view);
 
-        let start = SystemTime::now();
-        let since_the_epoch = start.duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
-        let in_ms = since_the_epoch.as_secs() * 1000 +
-            since_the_epoch.subsec_nanos() as u64 / 1_000_000;
+        let data_hash = crypto::hash(&self.data().as_bytes());
 
-        let timestamp = Timestamp::new(self.pub_key(), self.file_hash(), in_ms);
+        if schema.timestamp(&data_hash).is_none() {
 
-        println!("Create timestamp: {:?}", timestamp);
-        schema.timestamps_mut().put(self.pub_key(), timestamp);
+            let start = SystemTime::now();
+            let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+
+            let in_ms = since_the_epoch.as_secs() * 1000 +
+                since_the_epoch.subsec_nanos() as u64 / 1_000_000;
+
+
+            let timestamp = Timestamp::new(&data_hash, in_ms);
+
+            println!("Create timestamp: {:?}", timestamp);
+            schema.timestamps_mut().put(&data_hash, timestamp);
+        }
     }
 }
 
@@ -133,13 +136,13 @@ impl TimestampApi {
     fn get_timestamp(&self, req: &mut Request) -> IronResult<Response> {
         let path = req.url.path();
         let timestamp_key = path.last().unwrap();
-        let public_key = PublicKey::from_hex(timestamp_key)
+        let file_hash = Hash::from_hex(timestamp_key)
             .map_err(ApiError::FromHex)?;
 
         let get_timestamp = {
             let snapshot = self.blockchain.snapshot();
             let schema = TimestampSchema::new(snapshot);
-            schema.timestamp(&public_key)
+            schema.timestamp(&file_hash)
         };
 
         if let Some(timestamp) = get_timestamp {
@@ -196,7 +199,7 @@ impl Api for TimestampApi {
         // Bind handlers to specific routes.
         router.post("/v1/timestamp", post_create_timestamp, "post_create_timestamp");
         router.get("/v1/timestamp/all", get_all_timestamps, "get_all_timestamps");
-        router.get("/v1/timestamp/:pub_key", get_timestamp, "get_timestamp");
+        router.get("/v1/timestamp/:data_hash", get_timestamp, "get_timestamp");
     }
 }
 
