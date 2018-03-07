@@ -1,8 +1,9 @@
 // Import crates with necessary types into a new project.
 
 extern crate serde;
-#[macro_use]
 extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 #[macro_use]
 extern crate exonum;
 extern crate router;
@@ -10,27 +11,29 @@ extern crate bodyparser;
 extern crate iron;
 extern crate exonum_time;
 
-use exonum::blockchain::{Blockchain, Service, Transaction, ApiContext};
+// Import necessary types from crates.
+
+use exonum::blockchain::{Blockchain, Service, Transaction, ApiContext, ExecutionResult,
+                         TransactionSet};
+use exonum::encoding::serialize::FromHex;
 use exonum::node::{TransactionSend, ApiSender};
-use exonum::messages::{RawTransaction, Message};
+use exonum::messages::{RawTransaction};
 use exonum::storage::{Fork, MapIndex, Snapshot};
-use exonum::crypto::{self, Hash};
+use exonum::crypto::*;
 use exonum::encoding;
 use exonum::api::{Api, ApiError};
 use iron::prelude::*;
 use iron::Handler;
+use iron::status::Status;
+use iron::headers::ContentType;
+use iron::modifiers::Header;
 use router::Router;
-use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
-use exonum::encoding::serialize::FromHex;
-use exonum_time::TimeServiceFactory;
+use std::time::{UNIX_EPOCH};
 
 // // // // // // // // // // CONSTANTS // // // // // // // // // //
 
 /// Service ID for the `Service` trait.
 const SERVICE_ID: u16 = 1;
-
-const TX_CREATE_TIMESTAMP_ID: u16 = 1;
 
 // // // // // // // // // // PERSISTENT DATA // // // // // // // // // //
 
@@ -78,14 +81,13 @@ impl<'a> TimestampSchema<&'a mut Fork> {
 
 // // // // // // // // // // TRANSACTIONS // // // // // // // // // //
 
-message! {
-    struct TxCreateTimestamp {
+transactions! {
+    TimestampTransactions {
+        const SERVICE_ID = SERVICE_ID;
 
-        const TYPE = SERVICE_ID;
-
-        const ID = TX_CREATE_TIMESTAMP_ID;
-
-        data: &str,
+        struct TxCreateTimestamp {
+            data: &str,
+        }
     }
 }
 
@@ -102,37 +104,43 @@ impl Transaction for TxCreateTimestamp {
     /// If a wallet with the specified public key is not registered, then creates a new wallet
     /// with the specified public key and name, and an initial balance of 100.
     /// Otherwise, performs no op.
-    fn execute(&self, view: &mut Fork) {
+    fn execute(&self, view: &mut Fork) -> ExecutionResult {
 
 
-        let time_schema = exonum_time::TimeSchema::new(&view);
+        let time = {
+            let time_schema = exonum_time::TimeSchema::new(view.as_ref());
+            time_schema.time().get()
+        };
+
         // The time in the transaction should be less than in the blockchain.
-        match time_schema.time().get() {
+        match time {
             Some(current_time) => {
                 println!("time -- {:?}", current_time);
+                let mut schema = TimestampSchema::new(view);
+
+                let data_hash = hash(&self.data().as_bytes());
+
+
+                if schema.timestamp(&data_hash).is_none() {
+
+//                    let start = SystemTime::now();
+                    let since_the_epoch = current_time.duration_since(UNIX_EPOCH).unwrap();
+                    let in_ms = since_the_epoch.as_secs() * 1000 +
+                        since_the_epoch.subsec_nanos() as u64 / 1_000_000;
+
+
+
+                   let timestamp = Timestamp::new(&data_hash, in_ms);
+//
+//                    println!("Create timestamp: {:?}", timestamp);
+                    schema.timestamps_mut().put(&data_hash, timestamp);
+                }
                 // Execute transaction business logic.
             }
             _ => {}
         }
 
-//        let mut schema = TimestampSchema::new(view);
-//
-//        let data_hash = crypto::hash(&self.data().as_bytes());
-//
-//        if schema.timestamp(&data_hash).is_none() {
-//
-//            let start = SystemTime::now();
-//            let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-//            let in_ms = since_the_epoch.as_secs() * 1000 +
-//                since_the_epoch.subsec_nanos() as u64 / 1_000_000;
-//
-//
-//
-//            let timestamp = Timestamp::new(&data_hash, in_ms);
-//
-//            println!("Create timestamp: {:?}", timestamp);
-//            schema.timestamps_mut().put(&data_hash, timestamp);
-//        }
+        Ok(())
     }
 }
 
@@ -145,17 +153,28 @@ struct TimestampApi {
     blockchain: Blockchain,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TransactionResponse {
+    /// Hash of the transaction.
+    pub tx_hash: Hash,
+}
+
 impl TimestampApi {
     fn get_timestamp(&self, req: &mut Request) -> IronResult<Response> {
         let path = req.url.path();
         let timestamp_key = path.last().unwrap();
-        let file_hash = Hash::from_hex(timestamp_key)
-            .map_err(ApiError::FromHex)?;
+        let data_hash = Hash::from_hex(timestamp_key).map_err(|e| {
+            IronError::new(e, (
+                Status::BadRequest,
+                Header(ContentType::json()),
+                "\"Invalid request param: `data_hash`\"",
+            ))
+        })?;
 
         let get_timestamp = {
             let snapshot = self.blockchain.snapshot();
             let schema = TimestampSchema::new(snapshot);
-            schema.timestamp(&file_hash)
+            schema.timestamp(&data_hash)
         };
 
         if let Some(timestamp) = get_timestamp {
@@ -175,23 +194,17 @@ impl TimestampApi {
         self.ok_response(&serde_json::to_value(&timestamps).unwrap())
     }
 
-    fn post_transaction<T>(&self, req: &mut Request) -> IronResult<Response>
-        where
-            T: Transaction + Clone + for<'de> Deserialize<'de>,
-    {
-        match req.get::<bodyparser::Struct<T>>() {
+    fn post_transaction<T>(&self, req: &mut Request) -> IronResult<Response>{
+        match req.get::<bodyparser::Struct<TimestampTransactions>>() {
             Ok(Some(transaction)) => {
-                let transaction: Box<Transaction> = Box::new(transaction);
+                let transaction: Box<Transaction> = transaction.into();
                 let tx_hash = transaction.hash();
                 self.channel.send(transaction).map_err(ApiError::from)?;
-                self.ok_response(&json!({
-                    "tx_hash": tx_hash
-                }))
+                let json = TransactionResponse { tx_hash };
+                self.ok_response(&serde_json::to_value(&json).unwrap())
             }
-            Ok(None) => Err(ApiError::IncorrectRequest(
-                "Empty request body".into(),
-            ))?,
-            Err(e) => Err(ApiError::IncorrectRequest(Box::new(e)))?,
+            Ok(None) => Err(ApiError::BadRequest("Empty request body".into()))?,
+            Err(e) => Err(ApiError::BadRequest(e.to_string()))?,
         }
     }
 }
@@ -222,27 +235,30 @@ impl Api for TimestampApi {
 pub struct TimestampService;
 
 impl Service for TimestampService {
-    fn service_id(&self) -> u16 { SERVICE_ID }
+    fn service_id(&self) -> u16 {
+        SERVICE_ID
+    }
 
-    fn service_name(&self) -> &'static str { "timestamp_service" }
+    fn service_name(&self) -> &'static str {
+        "timestamp_service"
+    }
 
+    // Hashes for the service tables that will be included into the state hash.
+    // To simplify things, we don't have [Merkelized tables][merkle] in the service storage
+    // for now, so we return an empty vector.
+    //
+    // [merkle]: https://exonum.com/doc/architecture/storage/#merklized-indices
     fn state_hash(&self, _: &Snapshot) -> Vec<Hash> {
         vec![]
     }
 
-    fn tx_from_raw(&self, raw: RawTransaction)
-                   -> Result<Box<Transaction>, encoding::Error> {
-        let trans: Box<Transaction> = match raw.message_type() {
-            TX_CREATE_TIMESTAMP_ID => Box::new(TxCreateTimestamp::from_raw(raw)?),
-            _ => {
-                return Err(encoding::Error::IncorrectMessageType {
-                    message_type: raw.message_type()
-                });
-            }
-        };
-        Ok(trans)
+    // Implement a method to deserialize transactions coming to the node.
+    fn tx_from_raw(&self, raw: RawTransaction) -> Result<Box<Transaction>, encoding::Error> {
+        let tx = TimestampTransactions::tx_from_raw(raw)?;
+        Ok(tx.into())
     }
 
+    // Create a REST `Handler` to process web requests to the node.
     fn public_api_handler(&self, ctx: &ApiContext) -> Option<Box<Handler>> {
         let mut router = Router::new();
         let api = TimestampApi {

@@ -46,8 +46,9 @@ fn node_config() -> NodeConfig {
 
 fn main() {
     exonum::helpers::init_logger().unwrap();
+
     let node = Node::new(
-        Box::new(MemoryDB::new()),
+        MemoryDB::new(),
         vec![Box::new(TimestampService), Box::new(TimeService::new())],
         node_config(),
     );
