@@ -1,4 +1,4 @@
-#Timestamp sevice based on Exonum.
+# Timestamp sevice based on Exonum.
 
 `cargo run --example demo`
 
