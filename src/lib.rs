@@ -8,6 +8,7 @@ extern crate exonum;
 extern crate router;
 extern crate bodyparser;
 extern crate iron;
+extern crate exonum_time;
 
 use exonum::blockchain::{Blockchain, Service, Transaction, ApiContext};
 use exonum::node::{TransactionSend, ApiSender};
@@ -22,6 +23,7 @@ use router::Router;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use exonum::encoding::serialize::FromHex;
+use exonum_time::TimeServiceFactory;
 
 // // // // // // // // // // CONSTANTS // // // // // // // // // //
 
@@ -102,24 +104,35 @@ impl Transaction for TxCreateTimestamp {
     /// Otherwise, performs no op.
     fn execute(&self, view: &mut Fork) {
 
-        let mut schema = TimestampSchema::new(view);
 
-        let data_hash = crypto::hash(&self.data().as_bytes());
-
-        if schema.timestamp(&data_hash).is_none() {
-
-            let start = SystemTime::now();
-            let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-
-            let in_ms = since_the_epoch.as_secs() * 1000 +
-                since_the_epoch.subsec_nanos() as u64 / 1_000_000;
-
-
-            let timestamp = Timestamp::new(&data_hash, in_ms);
-
-            println!("Create timestamp: {:?}", timestamp);
-            schema.timestamps_mut().put(&data_hash, timestamp);
+        let time_schema = exonum_time::TimeSchema::new(&view);
+        // The time in the transaction should be less than in the blockchain.
+        match time_schema.time().get() {
+            Some(current_time) => {
+                println!("time -- {:?}", current_time);
+                // Execute transaction business logic.
+            }
+            _ => {}
         }
+
+//        let mut schema = TimestampSchema::new(view);
+//
+//        let data_hash = crypto::hash(&self.data().as_bytes());
+//
+//        if schema.timestamp(&data_hash).is_none() {
+//
+//            let start = SystemTime::now();
+//            let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+//            let in_ms = since_the_epoch.as_secs() * 1000 +
+//                since_the_epoch.subsec_nanos() as u64 / 1_000_000;
+//
+//
+//
+//            let timestamp = Timestamp::new(&data_hash, in_ms);
+//
+//            println!("Create timestamp: {:?}", timestamp);
+//            schema.timestamps_mut().put(&data_hash, timestamp);
+//        }
     }
 }
 

@@ -1,9 +1,11 @@
 extern crate exonum;
 extern crate timestamp_service;
+extern crate exonum_time;
 
 use exonum::blockchain::{GenesisConfig, ValidatorKeys};
 use exonum::node::{Node, NodeApiConfig, NodeConfig};
 use exonum::storage::MemoryDB;
+use exonum_time::TimeService;
 
 use timestamp_service::TimestampService;
 
@@ -46,7 +48,7 @@ fn main() {
     exonum::helpers::init_logger().unwrap();
     let node = Node::new(
         Box::new(MemoryDB::new()),
-        vec![Box::new(TimestampService)],
+        vec![Box::new(TimestampService), Box::new(TimeService::new())],
         node_config(),
     );
     println!("Starting a single node...");
